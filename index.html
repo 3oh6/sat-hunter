@@ -273,6 +273,31 @@
         }
 
         /**
+         * Fetch individual sat information from Ord server to get charms
+         * @param {number} sat - Satoshi ordinal number
+         * @returns {Promise<object>} Sat data including charms
+         */
+        async function getOrdSatInfo(sat) {
+            try {
+                const response = await fetch(`${CONFIG.ORD_API_URL}/sat/${sat}`, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                return await response.json();
+            } catch (error) {
+                console.error(`Failed to fetch sat info for ${sat}:`, error);
+                return null;
+            }
+        }
+
+        /**
          * Analyze sat ranges in a UTXO and find rare sats
          * @param {array} satRanges - Array of [start, end] sat ranges
          * @returns {object} Analysis of rare sats found
@@ -595,15 +620,50 @@
                     utxos.map(async (utxo) => {
                         const ordInfo = await getOrdUTXOInfo(utxo.txid, utxo.vout);
                         let rareAnalysis = null;
+                        let specialCharms = new Set();
 
                         if (ordInfo && ordInfo.sat_ranges) {
                             rareAnalysis = analyzeSatRanges(ordInfo.sat_ranges);
                             if (rareAnalysis.hasRareSats) {
                                 totalRareSats += rareAnalysis.count;
                             }
+
+                            // Check for special charms on sampled sats
+                            // Sample first sat, last sat, and middle sat from each range
+                            const satsToCheck = [];
+                            ordInfo.sat_ranges.forEach(([start, end]) => {
+                                satsToCheck.push(start); // First sat
+                                if (end - start > 1) {
+                                    satsToCheck.push(end); // Last sat
+                                    if (end - start > 100) {
+                                        satsToCheck.push(Math.floor((start + end) / 2)); // Middle sat
+                                    }
+                                }
+                            });
+
+                            // Fetch charm info for sampled sats (limit to avoid too many requests)
+                            const sampleSats = satsToCheck.slice(0, Math.min(5, satsToCheck.length));
+                            const charmPromises = sampleSats.map(sat => getOrdSatInfo(sat));
+                            const charmResults = await Promise.all(charmPromises);
+
+                            charmResults.forEach(satInfo => {
+                                if (satInfo && satInfo.charms && Array.isArray(satInfo.charms)) {
+                                    satInfo.charms.forEach(charm => {
+                                        // Filter out the ordinal theory charms we already show
+                                        if (!['common', 'uncommon', 'rare', 'epic', 'legendary', 'mythic'].includes(charm.toLowerCase())) {
+                                            specialCharms.add(charm);
+                                        }
+                                    });
+                                }
+                            });
                         }
 
-                        return { ...utxo, rareAnalysis, inscriptions: ordInfo?.inscriptions || [] };
+                        return {
+                            ...utxo,
+                            rareAnalysis,
+                            inscriptions: ordInfo?.inscriptions || [],
+                            charms: Array.from(specialCharms)
+                        };
                     })
                 );
 
@@ -623,7 +683,8 @@
                                         <th style="padding: 8px; text-align: left; border-bottom: 1px solid #dee2e6;">UTXO</th>
                                         <th style="padding: 8px; text-align: right; border-bottom: 1px solid #dee2e6;">Sats</th>
                                         <th style="padding: 8px; text-align: right; border-bottom: 1px solid #dee2e6;">BTC</th>
-                                        <th style="padding: 8px; text-align: center; border-bottom: 1px solid #dee2e6;">Rare Sats</th>
+                                        <th style="padding: 8px; text-align: center; border-bottom: 1px solid #dee2e6;">Rarity</th>
+                                        <th style="padding: 8px; text-align: center; border-bottom: 1px solid #dee2e6;">Charms</th>
                                         <th style="padding: 8px; text-align: center; border-bottom: 1px solid #dee2e6;">Inscr.</th>
                                         <th style="padding: 8px; text-align: center; border-bottom: 1px solid #dee2e6;">Ord Link</th>
                                     </tr>
@@ -654,6 +715,15 @@
                             `;
                         }
 
+                        // Format charms display
+                        let charmsHtml = '<span style="color: #999;">-</span>';
+                        if (utxo.charms && utxo.charms.length > 0) {
+                            const charmBadges = utxo.charms.map(charm => {
+                                return `<span style="background: #e74c3c; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; margin: 1px;">${charm}</span>`;
+                            }).join(' ');
+                            charmsHtml = charmBadges;
+                        }
+
                         // Format inscriptions display
                         let inscriptionsHtml = '<span style="color: #999;">-</span>';
                         if (utxo.inscriptions && utxo.inscriptions.length > 0) {
@@ -674,6 +744,9 @@
                                 </td>
                                 <td style="padding: 6px 8px; text-align: center;">
                                     ${rareSatsHtml}
+                                </td>
+                                <td style="padding: 6px 8px; text-align: center;">
+                                    ${charmsHtml}
                                 </td>
                                 <td style="padding: 6px 8px; text-align: center;">
                                     ${inscriptionsHtml}
@@ -706,12 +779,17 @@
                     <p style="margin: 5px 0 0 0;"><strong>Rare Sats Found:</strong> ${totalRareSats.toLocaleString()}</p>
                 </div>
                 <div style="background: #f8f9fa; padding: 10px; border-radius: 5px; margin-top: 10px; font-size: 11px;">
-                    <strong>Rarity Legend:</strong>
-                    <span style="color: ${RARITY_LEVELS.MYTHIC.color}; margin-left: 10px;">● Mythic</span>
-                    <span style="color: ${RARITY_LEVELS.LEGENDARY.color}; margin-left: 10px;">● Legendary</span>
-                    <span style="color: ${RARITY_LEVELS.EPIC.color}; margin-left: 10px;">● Epic</span>
-                    <span style="color: ${RARITY_LEVELS.RARE.color}; margin-left: 10px;">● Rare</span>
-                    <span style="color: ${RARITY_LEVELS.UNCOMMON.color}; margin-left: 10px;">● Uncommon</span>
+                    <div style="margin-bottom: 5px;">
+                        <strong>Ordinal Rarity:</strong>
+                        <span style="color: ${RARITY_LEVELS.MYTHIC.color}; margin-left: 10px;">● Mythic</span>
+                        <span style="color: ${RARITY_LEVELS.LEGENDARY.color}; margin-left: 10px;">● Legendary</span>
+                        <span style="color: ${RARITY_LEVELS.EPIC.color}; margin-left: 10px;">● Epic</span>
+                        <span style="color: ${RARITY_LEVELS.RARE.color}; margin-left: 10px;">● Rare</span>
+                        <span style="color: ${RARITY_LEVELS.UNCOMMON.color}; margin-left: 10px;">● Uncommon</span>
+                    </div>
+                    <div style="margin-top: 5px; color: #666;">
+                        <strong>Charms:</strong> Special characteristics like <em>palindrome</em>, <em>coin</em>, <em>vintage</em>, <em>pizza</em>, <em>block9</em>, etc.
+                    </div>
                 </div>
             `;
 
