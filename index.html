@@ -149,12 +149,37 @@
         
         <div class="input-group">
             <label for="addresses">Bitcoin Addresses (one per line):</label>
-            <textarea 
-                id="addresses" 
+            <textarea
+                id="addresses"
                 placeholder="Enter Bitcoin addresses, one per line:&#10;&#10;bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh&#10;1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa&#10;3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
             ></textarea>
         </div>
-        
+
+        <div class="input-group" style="background: #fff3cd; padding: 15px; border-radius: 8px; border-left: 4px solid #ffc107;">
+            <label style="color: #856404; margin-bottom: 10px;">🗓️ Filter by Date (Optional)</label>
+            <p style="font-size: 13px; color: #856404; margin: 0 0 10px 0;">
+                Search for satoshis that were mined during a specific time period. Leave blank to search all sats.
+            </p>
+            <div style="display: flex; gap: 15px; align-items: center;">
+                <div style="flex: 1;">
+                    <label for="startDate" style="font-size: 12px; color: #666;">Start Date:</label>
+                    <input
+                        type="date"
+                        id="startDate"
+                        style="width: 100%; padding: 8px; border: 2px solid #e1e5e9; border-radius: 6px; font-size: 14px;"
+                    />
+                </div>
+                <div style="flex: 1;">
+                    <label for="endDate" style="font-size: 12px; color: #666;">End Date (optional):</label>
+                    <input
+                        type="date"
+                        id="endDate"
+                        style="width: 100%; padding: 8px; border: 2px solid #e1e5e9; border-radius: 6px; font-size: 14px;"
+                    />
+                </div>
+            </div>
+        </div>
+
         <div class="button-group">
             <button class="btn-primary" onclick="validateAddresses()">Validate Addresses</button>
             <button class="btn-secondary" onclick="clearAll()">Clear</button>
@@ -353,6 +378,133 @@
             };
         }
 
+        /**
+         * Find the block height closest to a given timestamp using binary search
+         * @param {number} targetTimestamp - Unix timestamp in seconds
+         * @returns {Promise<number>} Block height
+         */
+        async function getBlockHeightForTimestamp(targetTimestamp) {
+            try {
+                const chainInfo = await callBitcoinRPC('getblockchaininfo');
+                const currentHeight = chainInfo.blocks;
+
+                // Binary search for the block with closest timestamp
+                let low = 0;
+                let high = currentHeight;
+                let closestHeight = 0;
+
+                while (low <= high) {
+                    const mid = Math.floor((low + high) / 2);
+                    const blockHash = await callBitcoinRPC('getblockhash', [mid]);
+                    const blockHeader = await callBitcoinRPC('getblockheader', [blockHash]);
+                    const blockTime = blockHeader.time;
+
+                    if (blockTime < targetTimestamp) {
+                        closestHeight = mid;
+                        low = mid + 1;
+                    } else if (blockTime > targetTimestamp) {
+                        high = mid - 1;
+                    } else {
+                        return mid; // Exact match
+                    }
+                }
+
+                return closestHeight;
+            } catch (error) {
+                console.error('Error finding block height for timestamp:', error);
+                throw error;
+            }
+        }
+
+        /**
+         * Calculate the sat range mined in a specific block
+         * @param {number} blockHeight - The block height
+         * @returns {object} { start: number, end: number } - First and last sat ordinals in block
+         */
+        function getSatRangeForBlock(blockHeight) {
+            const COIN_VALUE = 100000000; // sats per BTC
+            const SUBSIDY_HALVING_INTERVAL = 210000; // blocks
+
+            // Calculate total sats mined before this block
+            let totalSatsBefore = 0;
+            let currentHeight = 0;
+            let subsidy = 50 * COIN_VALUE;
+
+            while (currentHeight < blockHeight) {
+                const blocksInEpoch = Math.min(SUBSIDY_HALVING_INTERVAL, blockHeight - currentHeight);
+                const satsInEpoch = blocksInEpoch * subsidy;
+                totalSatsBefore += satsInEpoch;
+                currentHeight += blocksInEpoch;
+
+                if (currentHeight < blockHeight) {
+                    subsidy = Math.floor(subsidy / 2);
+                    if (subsidy === 0) break;
+                }
+            }
+
+            // Calculate subsidy for this specific block
+            const epoch = Math.floor(blockHeight / SUBSIDY_HALVING_INTERVAL);
+            const blockSubsidy = Math.floor((50 * COIN_VALUE) / Math.pow(2, epoch));
+
+            return {
+                start: totalSatsBefore,
+                end: totalSatsBefore + blockSubsidy - 1,
+                blockHeight: blockHeight,
+                subsidy: blockSubsidy
+            };
+        }
+
+        /**
+         * Get sat range for a date range
+         * @param {Date} startDate - Start date
+         * @param {Date} endDate - End date (optional, defaults to startDate)
+         * @returns {Promise<object>} { startSat, endSat, startBlock, endBlock }
+         */
+        async function getSatRangeForDateRange(startDate, endDate = null) {
+            if (!endDate) {
+                endDate = new Date(startDate);
+                endDate.setDate(endDate.getDate() + 1); // Next day
+            }
+
+            const startTimestamp = Math.floor(startDate.getTime() / 1000);
+            const endTimestamp = Math.floor(endDate.getTime() / 1000);
+
+            const startBlockHeight = await getBlockHeightForTimestamp(startTimestamp);
+            const endBlockHeight = await getBlockHeightForTimestamp(endTimestamp);
+
+            const startBlockSats = getSatRangeForBlock(startBlockHeight);
+            const endBlockSats = getSatRangeForBlock(endBlockHeight);
+
+            return {
+                startSat: startBlockSats.start,
+                endSat: endBlockSats.end,
+                startBlock: startBlockHeight,
+                endBlock: endBlockHeight
+            };
+        }
+
+        /**
+         * Check if a UTXO's sat ranges overlap with a date-based sat range filter
+         * @param {array} utxoSatRanges - Array of [start, end] sat ranges from UTXO
+         * @param {object} dateFilter - { startSat, endSat } from date range
+         * @returns {boolean} True if UTXO contains sats from the date range
+         */
+        function utxoContainsDateSats(utxoSatRanges, dateFilter) {
+            if (!dateFilter) return true; // No filter = all UTXOs match
+
+            const { startSat, endSat } = dateFilter;
+
+            // Check if any sat range in UTXO overlaps with date range
+            for (const [rangeStart, rangeEnd] of utxoSatRanges) {
+                // Check for overlap: range overlaps if it starts before dateEnd and ends after dateStart
+                if (rangeStart <= endSat && rangeEnd >= startSat) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         function showStatus(message, type = 'info') {
             const statusDiv = document.getElementById('status');
             statusDiv.className = `status ${type}`;
@@ -361,6 +513,8 @@
 
         function clearAll() {
             document.getElementById('addresses').value = '';
+            document.getElementById('startDate').value = '';
+            document.getElementById('endDate').value = '';
             document.getElementById('status').innerHTML = '';
         }
 
@@ -472,11 +626,42 @@
                 // First, test connection to Bitcoin Core
                 const nodeInfo = await callBitcoinRPC('getblockchaininfo');
 
+                // Check if date filter is enabled
+                const startDateInput = document.getElementById('startDate').value;
+                const endDateInput = document.getElementById('endDate').value;
+                let dateFilter = null;
+
+                if (startDateInput) {
+                    showStatus(`
+                        <h3>✅ Connected to Bitcoin Core!</h3>
+                        <p><strong>Chain:</strong> ${nodeInfo.chain}</p>
+                        <p><strong>Blocks:</strong> ${nodeInfo.blocks}</p>
+                        <hr>
+                        <p>🗓️ Calculating sat range for date: ${startDateInput}${endDateInput ? ' to ' + endDateInput : ''}...</p>
+                    `, 'info');
+
+                    const startDate = new Date(startDateInput);
+                    const endDate = endDateInput ? new Date(endDateInput) : null;
+
+                    dateFilter = await getSatRangeForDateRange(startDate, endDate);
+
+                    showStatus(`
+                        <h3>✅ Date Filter Calculated!</h3>
+                        <p><strong>Date Range:</strong> ${startDateInput}${endDateInput ? ' to ' + endDateInput : ''}</p>
+                        <p><strong>Block Range:</strong> ${dateFilter.startBlock.toLocaleString()} - ${dateFilter.endBlock.toLocaleString()}</p>
+                        <p><strong>Sat Range:</strong> ${dateFilter.startSat.toLocaleString()} - ${dateFilter.endSat.toLocaleString()}</p>
+                        <hr>
+                        <p>Now searching ${addresses.length} addresses for UTXOs containing these sats...</p>
+                    `, 'success');
+
+                    await new Promise(resolve => setTimeout(resolve, 1000)); // Brief pause to show filter info
+                }
+
                 showStatus(`
                     <h3>✅ Connected to Bitcoin Core!</h3>
                     <p><strong>Chain:</strong> ${nodeInfo.chain}</p>
                     <p><strong>Blocks:</strong> ${nodeInfo.blocks}</p>
-                    <p><strong>Verification Progress:</strong> ${(nodeInfo.verificationprogress * 100).toFixed(2)}%</p>
+                    ${dateFilter ? `<p>🗓️ <strong>Date Filter:</strong> Blocks ${dateFilter.startBlock.toLocaleString()} - ${dateFilter.endBlock.toLocaleString()}</p>` : ''}
                     <hr>
                     <p>Now searching ${addresses.length} addresses for UTXOs...</p>
                 `, 'success');
@@ -489,6 +674,7 @@
                     showStatus(`
                         <h3>✅ Connected to Bitcoin Core!</h3>
                         <p><strong>Chain:</strong> ${nodeInfo.chain} | <strong>Blocks:</strong> ${nodeInfo.blocks}</p>
+                        ${dateFilter ? `<p>🗓️ <strong>Date Filter:</strong> Blocks ${dateFilter.startBlock.toLocaleString()} - ${dateFilter.endBlock.toLocaleString()}</p>` : ''}
                         <hr>
                         <p>Scanning address ${i + 1}/${addresses.length}: <code>${address}</code></p>
                     `, 'info');
@@ -505,7 +691,7 @@
                     }
                 }
 
-                await displayUTXOResults(allUTXOs, nodeInfo);
+                await displayUTXOResults(allUTXOs, nodeInfo, dateFilter);
 
             } catch (error) {
                 console.error('Bitcoin RPC Error:', error);
@@ -581,15 +767,17 @@
             return scanResult.unspents || [];
         }
 
-        async function displayUTXOResults(addressUTXOs, nodeInfo) {
+        async function displayUTXOResults(addressUTXOs, nodeInfo, dateFilter = null) {
             let totalUTXOs = 0;
             let totalValue = 0;
             let totalRareSats = 0;
+            let dateMatchedUTXOs = 0;
 
             // Show initial loading message
             showStatus(`
                 <h3>🔍 UTXO Scan Results</h3>
                 <p><strong>Node:</strong> ${nodeInfo.chain} | Block ${nodeInfo.blocks}</p>
+                ${dateFilter ? `<p>🗓️ <strong>Date Filter:</strong> Blocks ${dateFilter.startBlock.toLocaleString()} - ${dateFilter.endBlock.toLocaleString()}</p>` : ''}
                 <hr>
                 <p>🔄 Analyzing rare sats via Ord server...</p>
             `, 'info');
@@ -597,6 +785,7 @@
             let html = `
                 <h3>🔍 UTXO Scan Results</h3>
                 <p><strong>Node:</strong> ${nodeInfo.chain} | Block ${nodeInfo.blocks}</p>
+                ${dateFilter ? `<p>🗓️ <strong>Date Filter:</strong> Blocks ${dateFilter.startBlock.toLocaleString()} - ${dateFilter.endBlock.toLocaleString()}</p>` : ''}
                 <hr>
             `;
 
@@ -621,11 +810,20 @@
                         const ordInfo = await getOrdUTXOInfo(utxo.txid, utxo.vout);
                         let rareAnalysis = null;
                         let specialCharms = new Set();
+                        let matchesDateFilter = false;
 
                         if (ordInfo && ordInfo.sat_ranges) {
                             rareAnalysis = analyzeSatRanges(ordInfo.sat_ranges);
                             if (rareAnalysis.hasRareSats) {
                                 totalRareSats += rareAnalysis.count;
+                            }
+
+                            // Check if UTXO matches date filter
+                            if (dateFilter) {
+                                matchesDateFilter = utxoContainsDateSats(ordInfo.sat_ranges, dateFilter);
+                                if (matchesDateFilter) {
+                                    dateMatchedUTXOs++;
+                                }
                             }
 
                             // Check for special charms on sampled sats
@@ -662,24 +860,37 @@
                             ...utxo,
                             rareAnalysis,
                             inscriptions: ordInfo?.inscriptions || [],
-                            charms: Array.from(specialCharms)
+                            charms: Array.from(specialCharms),
+                            matchesDateFilter: dateFilter ? matchesDateFilter : true // If no filter, all match
                         };
                     })
                 );
 
+                // Filter UTXOs if date filter is active
+                const filteredUTXOs = dateFilter
+                    ? utxosWithRareSats.filter(utxo => utxo.matchesDateFilter)
+                    : utxosWithRareSats;
+
+                const dateMatchCount = dateFilter ? filteredUTXOs.length : 0;
+
                 html += `
                     <div style="margin: 20px 0; padding: 15px; background: #f8f9fa; border-left: 4px solid #28a745; border-radius: 5px;">
                         <h4 style="margin: 0 0 10px 0; color: #333;">📍 ${address}</h4>
-                        <p style="margin: 0 0 15px 0;"><strong>UTXOs:</strong> ${utxos.length} | <strong>Total:</strong> ${addressValue.toFixed(8)} BTC (${Math.round(addressValue * 100000000).toLocaleString()} sats)</p>
+                        <p style="margin: 0 0 15px 0;">
+                            <strong>UTXOs:</strong> ${utxos.length}
+                            ${dateFilter ? ` | <strong>Date Matches:</strong> <span style="color: #f7931a;">${dateMatchCount}</span>` : ''}
+                            | <strong>Total:</strong> ${addressValue.toFixed(8)} BTC (${Math.round(addressValue * 100000000).toLocaleString()} sats)
+                        </p>
                 `;
 
-                if (utxosWithRareSats.length > 0) {
+                if (filteredUTXOs.length > 0) {
                     html += `
                         <div style="max-height: 400px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 4px;">
                             <table style="width: 100%; border-collapse: collapse; font-family: monospace; font-size: 12px;">
                                 <thead style="background: #e9ecef; position: sticky; top: 0;">
                                     <tr>
                                         <th style="padding: 8px; text-align: left; border-bottom: 1px solid #dee2e6;">#</th>
+                                        ${dateFilter ? '<th style="padding: 8px; text-align: center; border-bottom: 1px solid #dee2e6;">📅</th>' : ''}
                                         <th style="padding: 8px; text-align: left; border-bottom: 1px solid #dee2e6;">UTXO</th>
                                         <th style="padding: 8px; text-align: right; border-bottom: 1px solid #dee2e6;">Sats</th>
                                         <th style="padding: 8px; text-align: right; border-bottom: 1px solid #dee2e6;">BTC</th>
@@ -692,7 +903,7 @@
                                 <tbody>
                     `;
 
-                    utxosWithRareSats.forEach((utxo, index) => {
+                    filteredUTXOs.forEach((utxo, index) => {
                         const sats = Math.round(utxo.amount * 100000000);
                         const utxoId = `${utxo.txid}:${utxo.vout}`;
                         const ordUrl = `http://192.168.0.25/output/${utxoId}`;
@@ -730,9 +941,15 @@
                             inscriptionsHtml = `<span style="color: #f39c12; font-weight: bold;">${utxo.inscriptions.length}</span>`;
                         }
 
+                        // Date match indicator
+                        const dateMatchIcon = utxo.matchesDateFilter
+                            ? '<span style="color: #f7931a; font-size: 16px;" title="Contains sats from date range">🗓️</span>'
+                            : '<span style="color: #ccc;">-</span>';
+
                         html += `
                             <tr style="border-bottom: 1px solid #f1f3f4; background: ${rowBg};">
                                 <td style="padding: 6px 8px; color: #666;">${index + 1}</td>
+                                ${dateFilter ? `<td style="padding: 6px 8px; text-align: center;">${dateMatchIcon}</td>` : ''}
                                 <td style="padding: 6px 8px; word-break: break-all;">
                                     <span style="color: #666;">${utxo.txid.substring(0, 8)}...${utxo.txid.substring(utxo.txid.length - 8)}:${utxo.vout}</span>
                                 </td>
@@ -775,6 +992,7 @@
                 <div style="background: #e7f3ff; padding: 15px; border-radius: 5px; margin-top: 20px;">
                     <h4 style="margin: 0 0 10px 0; color: #0c5460;">📊 Summary</h4>
                     <p style="margin: 0;"><strong>Total UTXOs:</strong> ${totalUTXOs.toLocaleString()}</p>
+                    ${dateFilter ? `<p style="margin: 5px 0 0 0;"><strong>Date Matches:</strong> <span style="color: #f7931a;">${dateMatchedUTXOs.toLocaleString()}</span></p>` : ''}
                     <p style="margin: 5px 0 0 0;"><strong>Total Value:</strong> ${totalValue.toFixed(8)} BTC (${Math.round(totalValue * 100000000).toLocaleString()} sats)</p>
                     <p style="margin: 5px 0 0 0;"><strong>Rare Sats Found:</strong> ${totalRareSats.toLocaleString()}</p>
                 </div>
@@ -790,6 +1008,11 @@
                     <div style="margin-top: 5px; color: #666;">
                         <strong>Charms:</strong> Special characteristics like <em>palindrome</em>, <em>coin</em>, <em>vintage</em>, <em>pizza</em>, <em>block9</em>, etc.
                     </div>
+                    ${dateFilter ? `
+                    <div style="margin-top: 5px; color: #666;">
+                        <strong>Date Filter:</strong> 🗓️ indicates UTXOs containing sats mined between blocks ${dateFilter.startBlock.toLocaleString()} and ${dateFilter.endBlock.toLocaleString()}
+                    </div>
+                    ` : ''}
                 </div>
             `;
 
