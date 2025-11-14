@@ -179,6 +179,155 @@
             '3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy'
         ];
 
+        // Ordinal rarity constants (based on ordinal theory)
+        const RARITY_LEVELS = {
+            MYTHIC: { name: 'Mythic', color: '#9b59b6', priority: 6 },      // Genesis sat (sat 0)
+            LEGENDARY: { name: 'Legendary', color: '#e74c3c', priority: 5 }, // First sat of each cycle (6 halvings)
+            EPIC: { name: 'Epic', color: '#f39c12', priority: 4 },           // First sat of each halving epoch
+            RARE: { name: 'Rare', color: '#3498db', priority: 3 },           // First sat of difficulty adjustment
+            UNCOMMON: { name: 'Uncommon', color: '#2ecc71', priority: 2 },   // First sat of each block
+            COMMON: { name: 'Common', color: '#95a5a6', priority: 1 }        // All other sats
+        };
+
+        /**
+         * Determine the rarity of a satoshi based on ordinal theory
+         * @param {number} sat - The satoshi ordinal number
+         * @returns {object} Rarity information
+         */
+        function getSatRarity(sat) {
+            const COIN_VALUE = 100000000; // sats per BTC
+            const SUBSIDY_HALVING_INTERVAL = 210000; // blocks
+            const DIFFCHANGE_INTERVAL = 2016; // blocks
+            const CYCLE_EPOCHS = 6; // halvings per cycle
+
+            // Mythic: Genesis sat (sat 0)
+            if (sat === 0) {
+                return RARITY_LEVELS.MYTHIC;
+            }
+
+            // Calculate which block this sat was mined in
+            let satoshi = sat;
+            let blockHeight = 0;
+            let subsidy = 50 * COIN_VALUE;
+
+            // Find the block height by iterating through halvings
+            while (satoshi >= subsidy * SUBSIDY_HALVING_INTERVAL) {
+                satoshi -= subsidy * SUBSIDY_HALVING_INTERVAL;
+                blockHeight += SUBSIDY_HALVING_INTERVAL;
+                subsidy = Math.floor(subsidy / 2);
+                if (subsidy === 0) break;
+            }
+
+            if (subsidy > 0) {
+                blockHeight += Math.floor(satoshi / subsidy);
+            }
+
+            // Legendary: First sat of each cycle (every 6 halvings = 1,260,000 blocks)
+            if (blockHeight % (SUBSIDY_HALVING_INTERVAL * CYCLE_EPOCHS) === 0) {
+                return RARITY_LEVELS.LEGENDARY;
+            }
+
+            // Epic: First sat of each halving epoch (every 210,000 blocks)
+            if (blockHeight % SUBSIDY_HALVING_INTERVAL === 0) {
+                return RARITY_LEVELS.EPIC;
+            }
+
+            // Rare: First sat of each difficulty adjustment (every 2016 blocks)
+            if (blockHeight % DIFFCHANGE_INTERVAL === 0) {
+                return RARITY_LEVELS.RARE;
+            }
+
+            // Uncommon: First sat of each block
+            if (satoshi % subsidy === 0 || (subsidy > 0 && satoshi < subsidy)) {
+                return RARITY_LEVELS.UNCOMMON;
+            }
+
+            // Common: Everything else
+            return RARITY_LEVELS.COMMON;
+        }
+
+        /**
+         * Fetch UTXO information from Ord server
+         * @param {string} txid - Transaction ID
+         * @param {number} vout - Output index
+         * @returns {Promise<object>} UTXO data from Ord
+         */
+        async function getOrdUTXOInfo(txid, vout) {
+            try {
+                const response = await fetch(`${CONFIG.ORD_API_URL}/output/${txid}:${vout}`, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                return await response.json();
+            } catch (error) {
+                console.error(`Failed to fetch Ord info for ${txid}:${vout}:`, error);
+                return null;
+            }
+        }
+
+        /**
+         * Analyze sat ranges in a UTXO and find rare sats
+         * @param {array} satRanges - Array of [start, end] sat ranges
+         * @returns {object} Analysis of rare sats found
+         */
+        function analyzeSatRanges(satRanges) {
+            const rareSats = [];
+            let highestRarity = RARITY_LEVELS.COMMON;
+
+            satRanges.forEach(([start, end]) => {
+                // Check first sat in range
+                const startRarity = getSatRarity(start);
+                if (startRarity.priority > RARITY_LEVELS.COMMON.priority) {
+                    rareSats.push({ sat: start, rarity: startRarity });
+                    if (startRarity.priority > highestRarity.priority) {
+                        highestRarity = startRarity;
+                    }
+                }
+
+                // For large ranges, check key positions
+                // (Uncommon sats occur every ~50 BTC on average, so check strategically)
+                if (end - start > 1) {
+                    // Check last sat
+                    const endRarity = getSatRarity(end);
+                    if (endRarity.priority > RARITY_LEVELS.COMMON.priority) {
+                        rareSats.push({ sat: end, rarity: endRarity });
+                        if (endRarity.priority > highestRarity.priority) {
+                            highestRarity = endRarity;
+                        }
+                    }
+
+                    // For very large ranges, sample a few positions
+                    if (end - start > 100000000) { // > 1 BTC
+                        const sampleCount = Math.min(10, Math.floor((end - start) / 50000000));
+                        for (let i = 1; i < sampleCount; i++) {
+                            const sampleSat = start + Math.floor((end - start) * i / sampleCount);
+                            const sampleRarity = getSatRarity(sampleSat);
+                            if (sampleRarity.priority > RARITY_LEVELS.COMMON.priority) {
+                                rareSats.push({ sat: sampleSat, rarity: sampleRarity });
+                                if (sampleRarity.priority > highestRarity.priority) {
+                                    highestRarity = sampleRarity;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            return {
+                hasRareSats: rareSats.length > 0,
+                rareSats: rareSats,
+                highestRarity: highestRarity,
+                count: rareSats.length
+            };
+        }
+
         function showStatus(message, type = 'info') {
             const statusDiv = document.getElementById('status');
             statusDiv.className = `status ${type}`;
@@ -331,7 +480,7 @@
                     }
                 }
 
-                displayUTXOResults(allUTXOs, nodeInfo);
+                await displayUTXOResults(allUTXOs, nodeInfo);
 
             } catch (error) {
                 console.error('Bitcoin RPC Error:', error);
@@ -407,9 +556,18 @@
             return scanResult.unspents || [];
         }
 
-        function displayUTXOResults(addressUTXOs, nodeInfo) {
+        async function displayUTXOResults(addressUTXOs, nodeInfo) {
             let totalUTXOs = 0;
             let totalValue = 0;
+            let totalRareSats = 0;
+
+            // Show initial loading message
+            showStatus(`
+                <h3>🔍 UTXO Scan Results</h3>
+                <p><strong>Node:</strong> ${nodeInfo.chain} | Block ${nodeInfo.blocks}</p>
+                <hr>
+                <p>🔄 Analyzing rare sats via Ord server...</p>
+            `, 'info');
 
             let html = `
                 <h3>🔍 UTXO Scan Results</h3>
@@ -417,7 +575,7 @@
                 <hr>
             `;
 
-            addressUTXOs.forEach(({ address, utxos, error }) => {
+            for (const { address, utxos, error } of addressUTXOs) {
                 if (error) {
                     html += `
                         <div style="margin: 15px 0; padding: 10px; background: #fff3cd; border-left: 4px solid #ffc107;">
@@ -425,12 +583,29 @@
                             <small style="color: #856404;">Error: ${error}</small>
                         </div>
                     `;
-                    return;
+                    continue;
                 }
 
                 const addressValue = utxos.reduce((sum, utxo) => sum + utxo.amount, 0);
                 totalUTXOs += utxos.length;
                 totalValue += addressValue;
+
+                // Fetch rare sat data for all UTXOs in parallel
+                const utxosWithRareSats = await Promise.all(
+                    utxos.map(async (utxo) => {
+                        const ordInfo = await getOrdUTXOInfo(utxo.txid, utxo.vout);
+                        let rareAnalysis = null;
+
+                        if (ordInfo && ordInfo.sat_ranges) {
+                            rareAnalysis = analyzeSatRanges(ordInfo.sat_ranges);
+                            if (rareAnalysis.hasRareSats) {
+                                totalRareSats += rareAnalysis.count;
+                            }
+                        }
+
+                        return { ...utxo, rareAnalysis, inscriptions: ordInfo?.inscriptions || [] };
+                    })
+                );
 
                 html += `
                     <div style="margin: 20px 0; padding: 15px; background: #f8f9fa; border-left: 4px solid #28a745; border-radius: 5px;">
@@ -438,9 +613,9 @@
                         <p style="margin: 0 0 15px 0;"><strong>UTXOs:</strong> ${utxos.length} | <strong>Total:</strong> ${addressValue.toFixed(8)} BTC (${Math.round(addressValue * 100000000).toLocaleString()} sats)</p>
                 `;
 
-                if (utxos.length > 0) {
+                if (utxosWithRareSats.length > 0) {
                     html += `
-                        <div style="max-height: 300px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 4px;">
+                        <div style="max-height: 400px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 4px;">
                             <table style="width: 100%; border-collapse: collapse; font-family: monospace; font-size: 12px;">
                                 <thead style="background: #e9ecef; position: sticky; top: 0;">
                                     <tr>
@@ -448,28 +623,60 @@
                                         <th style="padding: 8px; text-align: left; border-bottom: 1px solid #dee2e6;">UTXO</th>
                                         <th style="padding: 8px; text-align: right; border-bottom: 1px solid #dee2e6;">Sats</th>
                                         <th style="padding: 8px; text-align: right; border-bottom: 1px solid #dee2e6;">BTC</th>
+                                        <th style="padding: 8px; text-align: center; border-bottom: 1px solid #dee2e6;">Rare Sats</th>
+                                        <th style="padding: 8px; text-align: center; border-bottom: 1px solid #dee2e6;">Inscr.</th>
                                         <th style="padding: 8px; text-align: center; border-bottom: 1px solid #dee2e6;">Ord Link</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                     `;
 
-                    utxos.forEach((utxo, index) => {
+                    utxosWithRareSats.forEach((utxo, index) => {
                         const sats = Math.round(utxo.amount * 100000000);
                         const utxoId = `${utxo.txid}:${utxo.vout}`;
                         const ordUrl = `http://192.168.0.25/output/${utxoId}`;
 
+                        // Determine row background color based on rarity
+                        let rowBg = index % 2 === 1 ? '#f8f9fa' : '#ffffff';
+                        if (utxo.rareAnalysis?.hasRareSats) {
+                            const rarity = utxo.rareAnalysis.highestRarity;
+                            rowBg = `linear-gradient(to right, ${rarity.color}15, ${rowBg})`;
+                        }
+
+                        // Format rare sats display
+                        let rareSatsHtml = '<span style="color: #999;">-</span>';
+                        if (utxo.rareAnalysis?.hasRareSats) {
+                            const rarity = utxo.rareAnalysis.highestRarity;
+                            rareSatsHtml = `
+                                <span style="color: ${rarity.color}; font-weight: bold;" title="${utxo.rareAnalysis.count} rare sat(s) found">
+                                    ${rarity.name}
+                                </span>
+                            `;
+                        }
+
+                        // Format inscriptions display
+                        let inscriptionsHtml = '<span style="color: #999;">-</span>';
+                        if (utxo.inscriptions && utxo.inscriptions.length > 0) {
+                            inscriptionsHtml = `<span style="color: #f39c12; font-weight: bold;">${utxo.inscriptions.length}</span>`;
+                        }
+
                         html += `
-                            <tr style="border-bottom: 1px solid #f1f3f4; ${index % 2 === 1 ? 'background: #f8f9fa;' : ''}">
+                            <tr style="border-bottom: 1px solid #f1f3f4; background: ${rowBg};">
                                 <td style="padding: 6px 8px; color: #666;">${index + 1}</td>
                                 <td style="padding: 6px 8px; word-break: break-all;">
-                                    <span style="color: #666;">${utxo.txid.substring(0, 8)}...${utxo.txid.substring(-8)}:${utxo.vout}</span>
+                                    <span style="color: #666;">${utxo.txid.substring(0, 8)}...${utxo.txid.substring(utxo.txid.length - 8)}:${utxo.vout}</span>
                                 </td>
                                 <td style="padding: 6px 8px; text-align: right; font-weight: 500;">
                                     ${sats.toLocaleString()}
                                 </td>
                                 <td style="padding: 6px 8px; text-align: right;">
                                     ${utxo.amount.toFixed(8)}
+                                </td>
+                                <td style="padding: 6px 8px; text-align: center;">
+                                    ${rareSatsHtml}
+                                </td>
+                                <td style="padding: 6px 8px; text-align: center;">
+                                    ${inscriptionsHtml}
                                 </td>
                                 <td style="padding: 6px 8px; text-align: center;">
                                     <a href="${ordUrl}" target="_blank" style="color: #f7931a; text-decoration: none; font-weight: bold;">
@@ -488,7 +695,7 @@
                 }
 
                 html += `</div>`;
-            });
+            }
 
             html += `
                 <hr>
@@ -496,6 +703,15 @@
                     <h4 style="margin: 0 0 10px 0; color: #0c5460;">📊 Summary</h4>
                     <p style="margin: 0;"><strong>Total UTXOs:</strong> ${totalUTXOs.toLocaleString()}</p>
                     <p style="margin: 5px 0 0 0;"><strong>Total Value:</strong> ${totalValue.toFixed(8)} BTC (${Math.round(totalValue * 100000000).toLocaleString()} sats)</p>
+                    <p style="margin: 5px 0 0 0;"><strong>Rare Sats Found:</strong> ${totalRareSats.toLocaleString()}</p>
+                </div>
+                <div style="background: #f8f9fa; padding: 10px; border-radius: 5px; margin-top: 10px; font-size: 11px;">
+                    <strong>Rarity Legend:</strong>
+                    <span style="color: ${RARITY_LEVELS.MYTHIC.color}; margin-left: 10px;">● Mythic</span>
+                    <span style="color: ${RARITY_LEVELS.LEGENDARY.color}; margin-left: 10px;">● Legendary</span>
+                    <span style="color: ${RARITY_LEVELS.EPIC.color}; margin-left: 10px;">● Epic</span>
+                    <span style="color: ${RARITY_LEVELS.RARE.color}; margin-left: 10px;">● Rare</span>
+                    <span style="color: ${RARITY_LEVELS.UNCOMMON.color}; margin-left: 10px;">● Uncommon</span>
                 </div>
             `;
 
