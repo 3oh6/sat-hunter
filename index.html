@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rare Sats Finder</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f8f9fa;
+        }
+        
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            color: #f7931a;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .input-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #333;
+        }
+        
+        textarea {
+            width: 100%;
+            min-height: 120px;
+            padding: 12px;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            font-family: Monaco, 'Courier New', monospace;
+            font-size: 14px;
+            resize: vertical;
+        }
+        
+        textarea:focus {
+            outline: none;
+            border-color: #f7931a;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 12px;
+            margin-top: 20px;
+        }
+        
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .btn-primary {
+            background: #f7931a;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #e8830a;
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background: #545b62;
+        }
+        
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: Monaco, 'Courier New', monospace;
+            font-size: 14px;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        
+        .config {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border-left: 4px solid #f7931a;
+        }
+        
+        .config-title {
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #333;
+        }
+        
+        .config-info {
+            font-family: Monaco, 'Courier New', monospace;
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🟠 Rare Sats Finder</h1>
+        
+        <div class="config">
+            <div class="config-title">Configuration</div>
+            <div class="config-info">
+                Bitcoin Node: 192.168.0.25<br>
+                Ord Server: http://192.168.0.25<br>
+                Status: <span id="nodeStatus">Connecting...</span>
+                <button onclick="checkProxyConnection()" style="margin-left: 10px; padding: 2px 8px; font-size: 11px; background: #f7931a; color: white; border: none; border-radius: 3px; cursor: pointer;">Test Connection</button>
+            </div>
+        </div>
+        
+        <div class="input-group">
+            <label for="addresses">Bitcoin Addresses (one per line):</label>
+            <textarea 
+                id="addresses" 
+                placeholder="Enter Bitcoin addresses, one per line:&#10;&#10;bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh&#10;1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa&#10;3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+            ></textarea>
+        </div>
+        
+        <div class="button-group">
+            <button class="btn-primary" onclick="validateAddresses()">Validate Addresses</button>
+            <button class="btn-secondary" onclick="clearAll()">Clear</button>
+        </div>
+        
+        <div id="status"></div>
+    </div>
+
+    <script>
+        // Configuration for local Bitcoin node via CORS proxy
+        const CONFIG = {
+            BITCOIN_RPC_URL: 'http://192.168.0.25:3001/rpc',  // CORS proxy for Bitcoin Core
+            ORD_API_URL: 'http://192.168.0.25',               // Direct to Ord server (no proxy needed)
+            HEALTH_URL: 'http://192.168.0.25:3001/health',    // Health check for proxy
+            // RPC credentials now handled by proxy server
+        };
+
+        // Sample addresses for testing
+        const SAMPLE_ADDRESSES = [
+            'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh',
+            '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa',
+            '3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy'
+        ];
+
+        function showStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('status');
+            statusDiv.className = `status ${type}`;
+            statusDiv.innerHTML = message;
+        }
+
+        function clearAll() {
+            document.getElementById('addresses').value = '';
+            document.getElementById('status').innerHTML = '';
+        }
+
+        function validateAddresses() {
+            const textarea = document.getElementById('addresses');
+            const addresses = textarea.value
+                .split('\n')
+                .map(addr => addr.trim())
+                .filter(addr => addr.length > 0);
+
+            if (addresses.length === 0) {
+                showStatus('Please enter at least one Bitcoin address.', 'error');
+                return;
+            }
+
+            showStatus('Validating addresses...', 'info');
+
+            // Simple client-side validation patterns
+            const validationResults = addresses.map(address => {
+                const result = validateBitcoinAddress(address);
+                return { address, ...result };
+            });
+
+            displayValidationResults(validationResults);
+        }
+
+        function validateBitcoinAddress(address) {
+            // Basic Bitcoin address validation patterns
+            const patterns = {
+                legacy: /^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/,           // P2PKH, P2SH
+                segwit: /^bc1[a-z0-9]{39,59}$/,                       // Bech32
+                taproot: /^bc1p[a-z0-9]{58}$/                         // Bech32m (Taproot)
+            };
+
+            if (patterns.legacy.test(address)) {
+                return { valid: true, type: 'Legacy (P2PKH/P2SH)' };
+            } else if (patterns.segwit.test(address)) {
+                return { valid: true, type: 'SegWit (Bech32)' };
+            } else if (patterns.taproot.test(address)) {
+                return { valid: true, type: 'Taproot (Bech32m)' };
+            } else {
+                return { valid: false, type: 'Invalid format' };
+            }
+        }
+
+        function displayValidationResults(results) {
+            const validCount = results.filter(r => r.valid).length;
+            const invalidCount = results.length - validCount;
+
+            let html = `<h3>Validation Results</h3>`;
+            html += `<p><strong>Total:</strong> ${results.length} addresses</p>`;
+            html += `<p><strong>Valid:</strong> ${validCount} | <strong>Invalid:</strong> ${invalidCount}</p>`;
+
+            if (invalidCount > 0) {
+                html += `<h4>❌ Invalid Addresses:</h4>`;
+                results.filter(r => !r.valid).forEach(result => {
+                    html += `<div style="margin: 5px 0; font-family: monospace; color: #d32f2f;">
+                        ${result.address} - ${result.type}
+                    </div>`;
+                });
+            }
+
+            if (validCount > 0) {
+                html += `<h4>✅ Valid Addresses:</h4>`;
+                results.filter(r => r.valid).forEach(result => {
+                    html += `<div style="margin: 5px 0; font-family: monospace; color: #2e7d32;">
+                        ${result.address} - ${result.type}
+                    </div>`;
+                });
+
+                html += `<div style="margin-top: 20px;">
+                    <button class="btn-primary" onclick="searchRareSats()" style="margin-right: 10px;">
+                        🔍 Search for UTXOs
+                    </button>
+                    <small style="color: #666;">Next: Connect to your local Bitcoin node</small>
+                </div>`;
+            }
+
+            showStatus(html, validCount === results.length ? 'success' : (validCount > 0 ? 'info' : 'error'));
+        }
+
+        function searchRareSats() {
+            const textarea = document.getElementById('addresses');
+            const addresses = textarea.value
+                .split('\n')
+                .map(addr => addr.trim())
+                .filter(addr => addr.length > 0);
+
+            if (addresses.length === 0) {
+                showStatus('Please enter valid Bitcoin addresses first.', 'error');
+                return;
+            }
+
+            // Filter only valid addresses
+            const validAddresses = addresses.filter(addr => validateBitcoinAddress(addr).valid);
+
+            if (validAddresses.length === 0) {
+                showStatus('No valid addresses found. Please validate addresses first.', 'error');
+                return;
+            }
+
+            showStatus('🔍 Connecting to Bitcoin Core and searching for UTXOs...', 'info');
+
+            searchRareSatsForAddresses(validAddresses);
+        }
+
+        async function searchRareSatsForAddresses(addresses) {
+            try {
+                // First, test connection to Bitcoin Core
+                const nodeInfo = await callBitcoinRPC('getblockchaininfo');
+
+                showStatus(`
+                    <h3>✅ Connected to Bitcoin Core!</h3>
+                    <p><strong>Chain:</strong> ${nodeInfo.chain}</p>
+                    <p><strong>Blocks:</strong> ${nodeInfo.blocks}</p>
+                    <p><strong>Verification Progress:</strong> ${(nodeInfo.verificationprogress * 100).toFixed(2)}%</p>
+                    <hr>
+                    <p>Now searching ${addresses.length} addresses for UTXOs...</p>
+                `, 'success');
+
+                // Get UTXOs for each address
+                const allUTXOs = [];
+
+                for (let i = 0; i < addresses.length; i++) {
+                    const address = addresses[i];
+                    showStatus(`
+                        <h3>✅ Connected to Bitcoin Core!</h3>
+                        <p><strong>Chain:</strong> ${nodeInfo.chain} | <strong>Blocks:</strong> ${nodeInfo.blocks}</p>
+                        <hr>
+                        <p>Scanning address ${i + 1}/${addresses.length}: <code>${address}</code></p>
+                    `, 'info');
+
+                    try {
+                        const utxos = await getUTXOsForAddress(address);
+                        allUTXOs.push({ address, utxos });
+
+                        // Small delay to prevent overwhelming the node
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    } catch (error) {
+                        console.warn(`Failed to get UTXOs for ${address}:`, error);
+                        allUTXOs.push({ address, utxos: [], error: error.message });
+                    }
+                }
+
+                displayUTXOResults(allUTXOs, nodeInfo);
+
+            } catch (error) {
+                console.error('Bitcoin RPC Error:', error);
+                showStatus(`
+                    <h3>❌ Connection Failed</h3>
+                    <p><strong>Error:</strong> ${error.message}</p>
+                    <p><strong>Troubleshooting:</strong></p>
+                    <ul style="text-align: left; margin: 10px 0;">
+                        <li>Ensure Bitcoin Core is running on 192.168.0.25</li>
+                        <li>Check RPC is enabled in bitcoin.conf</li>
+                        <li>Verify firewall allows port 8332</li>
+                        <li>CORS issues: may need proxy for web access</li>
+                    </ul>
+                    <p><em>Note: Direct RPC from browser may require CORS proxy</em></p>
+                `, 'error');
+            }
+        }
+
+        async function callBitcoinRPC(method, params = []) {
+            const request = {
+                method: method,
+                params: params,
+                id: Date.now()
+            };
+
+            const response = await fetch(CONFIG.BITCOIN_RPC_URL, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(request)
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const data = await response.json();
+
+            if (data.error) {
+                throw new Error(`RPC Error: ${data.error.message} (${data.error.code})`);
+            }
+
+            return data.result;
+        }
+
+        async function getUTXOsForAddress(address) {
+            try {
+                // Try fast method first (if address is imported/watched)
+                console.log(`Trying fast lookup for ${address}`);
+                const listUnspent = await callBitcoinRPC('listunspent', [0, 9999999, [address]]);
+
+                if (listUnspent && listUnspent.length > 0) {
+                    console.log(`✅ Fast lookup found ${listUnspent.length} UTXOs`);
+                    return listUnspent.map(utxo => ({
+                        txid: utxo.txid,
+                        vout: utxo.vout,
+                        amount: utxo.amount,
+                        height: utxo.confirmations ? (910658 - utxo.confirmations + 1) : 0
+                    }));
+                }
+            } catch (error) {
+                console.log(`Fast lookup failed: ${error.message}`);
+            }
+
+            // Fallback to slow scantxoutset method
+            console.log(`Using slow scantxoutset for ${address}`);
+            const scanResult = await callBitcoinRPC('scantxoutset', [
+                'start',
+                [`addr(${address})`]
+            ]);
+
+            return scanResult.unspents || [];
+        }
+
+        function displayUTXOResults(addressUTXOs, nodeInfo) {
+            let totalUTXOs = 0;
+            let totalValue = 0;
+
+            let html = `
+                <h3>🔍 UTXO Scan Results</h3>
+                <p><strong>Node:</strong> ${nodeInfo.chain} | Block ${nodeInfo.blocks}</p>
+                <hr>
+            `;
+
+            addressUTXOs.forEach(({ address, utxos, error }) => {
+                if (error) {
+                    html += `
+                        <div style="margin: 15px 0; padding: 10px; background: #fff3cd; border-left: 4px solid #ffc107;">
+                            <strong>⚠️ ${address}</strong><br>
+                            <small style="color: #856404;">Error: ${error}</small>
+                        </div>
+                    `;
+                    return;
+                }
+
+                const addressValue = utxos.reduce((sum, utxo) => sum + utxo.amount, 0);
+                totalUTXOs += utxos.length;
+                totalValue += addressValue;
+
+                html += `
+                    <div style="margin: 20px 0; padding: 15px; background: #f8f9fa; border-left: 4px solid #28a745; border-radius: 5px;">
+                        <h4 style="margin: 0 0 10px 0; color: #333;">📍 ${address}</h4>
+                        <p style="margin: 0 0 15px 0;"><strong>UTXOs:</strong> ${utxos.length} | <strong>Total:</strong> ${addressValue.toFixed(8)} BTC (${Math.round(addressValue * 100000000).toLocaleString()} sats)</p>
+                `;
+
+                if (utxos.length > 0) {
+                    html += `
+                        <div style="max-height: 300px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 4px;">
+                            <table style="width: 100%; border-collapse: collapse; font-family: monospace; font-size: 12px;">
+                                <thead style="background: #e9ecef; position: sticky; top: 0;">
+                                    <tr>
+                                        <th style="padding: 8px; text-align: left; border-bottom: 1px solid #dee2e6;">#</th>
+                                        <th style="padding: 8px; text-align: left; border-bottom: 1px solid #dee2e6;">UTXO</th>
+                                        <th style="padding: 8px; text-align: right; border-bottom: 1px solid #dee2e6;">Sats</th>
+                                        <th style="padding: 8px; text-align: right; border-bottom: 1px solid #dee2e6;">BTC</th>
+                                        <th style="padding: 8px; text-align: center; border-bottom: 1px solid #dee2e6;">Ord Link</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                    `;
+
+                    utxos.forEach((utxo, index) => {
+                        const sats = Math.round(utxo.amount * 100000000);
+                        const utxoId = `${utxo.txid}:${utxo.vout}`;
+                        const ordUrl = `http://192.168.0.25/output/${utxoId}`;
+
+                        html += `
+                            <tr style="border-bottom: 1px solid #f1f3f4; ${index % 2 === 1 ? 'background: #f8f9fa;' : ''}">
+                                <td style="padding: 6px 8px; color: #666;">${index + 1}</td>
+                                <td style="padding: 6px 8px; word-break: break-all;">
+                                    <span style="color: #666;">${utxo.txid.substring(0, 8)}...${utxo.txid.substring(-8)}:${utxo.vout}</span>
+                                </td>
+                                <td style="padding: 6px 8px; text-align: right; font-weight: 500;">
+                                    ${sats.toLocaleString()}
+                                </td>
+                                <td style="padding: 6px 8px; text-align: right;">
+                                    ${utxo.amount.toFixed(8)}
+                                </td>
+                                <td style="padding: 6px 8px; text-align: center;">
+                                    <a href="${ordUrl}" target="_blank" style="color: #f7931a; text-decoration: none; font-weight: bold;">
+                                        🔍 View
+                                    </a>
+                                </td>
+                            </tr>
+                        `;
+                    });
+
+                    html += `
+                                </tbody>
+                            </table>
+                        </div>
+                    `;
+                }
+
+                html += `</div>`;
+            });
+
+            html += `
+                <hr>
+                <div style="background: #e7f3ff; padding: 15px; border-radius: 5px; margin-top: 20px;">
+                    <h4 style="margin: 0 0 10px 0; color: #0c5460;">📊 Summary</h4>
+                    <p style="margin: 0;"><strong>Total UTXOs:</strong> ${totalUTXOs.toLocaleString()}</p>
+                    <p style="margin: 5px 0 0 0;"><strong>Total Value:</strong> ${totalValue.toFixed(8)} BTC (${Math.round(totalValue * 100000000).toLocaleString()} sats)</p>
+                </div>
+            `;
+
+            showStatus(html, totalUTXOs > 0 ? 'success' : 'info');
+        }
+
+        async function checkProxyConnection() {
+            try {
+                console.log('Testing proxy connection to:', CONFIG.HEALTH_URL);
+
+                // Try different fetch configurations
+                const fetchOptions = [
+                    { method: 'GET', mode: 'cors' },
+                    { method: 'GET', mode: 'no-cors' },
+                    { method: 'GET' }
+                ];
+
+                for (let i = 0; i < fetchOptions.length; i++) {
+                    try {
+                        console.log(`Attempt ${i + 1} with options:`, fetchOptions[i]);
+
+                        const response = await fetch(CONFIG.HEALTH_URL, fetchOptions[i]);
+                        console.log('Response status:', response.status);
+                        console.log('Response type:', response.type);
+
+                        if (response.type === 'opaque') {
+                            console.log('Opaque response - CORS issue, but connection works');
+                            document.getElementById('nodeStatus').innerHTML = `
+                                <span style="color: #ffc107;">⚠️ CORS Issue</span><br>
+                                <small style="font-size: 10px;">Connection works but CORS blocked</small>
+                            `;
+                            return false;
+                        }
+
+                        const health = await response.json();
+                        console.log('Health response:', health);
+
+                        document.getElementById('nodeStatus').innerHTML = `
+                            <span style="color: #28a745;">✅ Proxy Connected</span><br>
+                            <small style="font-size: 10px;">${health.timestamp}</small>
+                        `;
+
+                        return true;
+
+                    } catch (attemptError) {
+                        console.log(`Attempt ${i + 1} failed:`, attemptError.message);
+                        if (i === fetchOptions.length - 1) {
+                            throw attemptError;
+                        }
+                    }
+                }
+
+            } catch (error) {
+                console.error('All connection attempts failed:', error);
+
+                // Test if it's a file:// protocol issue
+                const isFileProtocol = window.location.protocol === 'file:';
+
+                document.getElementById('nodeStatus').innerHTML = `
+                    <span style="color: #dc3545;">❌ Connection Failed</span><br>
+                    <small style="font-size: 10px;">
+                        ${isFileProtocol ? 'File protocol detected - use HTTP server' : error.message}
+                    </small>
+                `;
+
+                if (isFileProtocol) {
+                    showStatus(`
+                        <h3>⚠️ File Protocol Detected</h3>
+                        <p>Browsers block network requests from file:// URLs.</p>
+                        <p><strong>Solution:</strong> Serve the HTML via HTTP:</p>
+                        <div style="background: #f8f9fa; padding: 10px; border-radius: 5px; font-family: monospace; margin: 10px 0;">
+                            # In your HTML file directory:<br>
+                            python3 -m http.server 8080<br><br>
+                            # Then open: http://localhost:8080/your-file.html
+                        </div>
+                    `, 'error');
+                }
+
+                return false;
+            }
+        }
+
+        // Initialize
+        window.onload = function() {
+            checkProxyConnection();
+            document.getElementById('addresses').value = SAMPLE_ADDRESSES.join('\n');
+            showStatus('Enter Bitcoin addresses above and click "Validate Addresses" to begin.', 'info');
+        };
+    </script>
+</body>
+</html>
